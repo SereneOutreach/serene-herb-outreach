@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -77,6 +78,7 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#fafafa}
 @keyframes spin{to{transform:rotate(360deg)}}
 .footer{text-align:center;margin-top:60px;padding-top:24px;border-top:1px solid var(--border);font-size:.7rem;color:var(--text-muted);font-weight:500;letter-spacing:.05em}
 .refresh-note{font-size:.65rem;color:var(--text-muted);margin-top:4px}
+.data-source{font-size:.6rem;color:var(--pop-green);margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 @keyframes up{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:768px){header h1{font-size:2.2rem}.stats{grid-template-columns:repeat(2,1fr)}.stats .stat:last-child{grid-column:span 2}.row{grid-template-columns:1fr}.tabs{flex-wrap:wrap}.cr-header,.cr-row{grid-template-columns:1fr 1fr;gap:8px}}
 </style>
@@ -87,12 +89,8 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#fafafa}
   <div class="topbar-live"><span class="live-dot"></span> Live Dashboard</div>
 </div>
 <div class="container">
-<header><h1>Creator Outreach</h1><p>Performance tracking across all outreach channels — live from Google Sheets</p></header>
-
-<div id="app">
-  <div class="loading"><div class="spinner"></div><h2>Loading data...</h2><p>Pulling latest numbers from your Google Sheet</p></div>
-</div>
-
+<header><h1>Creator Outreach</h1><p>Performance tracking across all outreach channels</p></header>
+<div id="app"><div class="loading"><div class="spinner"></div><h2>Loading data...</h2><p>Pulling latest numbers from Google Sheets</p></div></div>
 <div id="dashboard" style="display:none">
   <div class="tabs" id="tabs"></div>
   <div class="stats" id="stats"></div>
@@ -113,132 +111,205 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#fafafa}
     </div>
   </div>
 </div>
-
 <div class="footer">
   Serene Herb Creator Outreach &middot; Last updated <span id="updated"></span>
   <div class="refresh-note">Auto-refreshes every 2 minutes</div>
+  <div class="data-source" id="dataSource"></div>
 </div>
 </div>
-
 <script>
-// ===== CONFIGURATION =====
+// ===== CONFIG =====
 const SHEET_ID = '1IG5uCBV2FKZT127PuWpJuGRhGGzegT5hGL_Yu1_YI4o';
-
-// Tab names to EXCLUDE (your private tabs)
-const EXCLUDE_TABS = ['RESPONSES', 'CREATORS WHO ACCEPTED A RETAINE', 'CREATORS WHO JOINED DISCORD'];
-
-// Channel column mapping (same across all month tabs)
-// Col A=dates, C-E=Shah's TikTok, G-I=Serene Email, K-M=TikTok Backend, O-Q=Business TikTok
 const CHANNELS = [
   {name:"Shah's TikTok", cols:{sent:2, resp:3, conv:4}},
   {name:"Serene Email", cols:{sent:6, resp:7, conv:8}},
   {name:"TikTok Backend", cols:{sent:10, resp:11, conv:12}},
   {name:"Business TikTok", cols:{sent:14, resp:15, conv:16}}
 ];
+const EXCLUDE_TABS = ['responses','creators who accepted','creators who joined'];
+const MONTH_ORDER = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
 let DATA = {};
 let cur = null;
 let chart = null;
+let dataLive = false;
 
-// ===== FETCH FROM GOOGLE SHEETS =====
+// ===== GOOGLE SHEETS FETCH =====
 async function fetchSheet() {
   try {
-    // Fetch the published HTML to get tab names and gids
-    const htmlUrl = `https://docs.google.com/spreadsheets/d/e/2PACX-1vQScGjDXeexQo5-6cB5nsoHcEyWq9KbQxBC1d-lMaeMMA4MELKpr66YwQDSKuEq61tXFQcInGIynLg0/pubhtml`;
-    const htmlResp = await fetch(htmlUrl);
-    const html = await htmlResp.text();
+    // Step 1: Discover tabs by fetching the published HTML
+    const pubUrl = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQScGjDXeexQo5-6cB5nsoHcEyWq9KbQxBC1d-lMaeMMA4MELKpr66YwQDSKuEq61tXFQcInGIynLg0/pubhtml';
+    const resp = await fetch(pubUrl);
+    const html = await resp.text();
 
-    // Extract tab names and gids from the HTML
-    const tabRegex = /id="sheet-button-(\d+)"[^>]*>([^<]+)</g;
+    // Parse tab names and gids from the HTML
     const tabs = [];
-    let match;
-    while ((match = tabRegex.exec(html)) !== null) {
-      const gid = match[1];
-      const name = match[2].trim();
-      if (!EXCLUDE_TABS.some(ex => name.toUpperCase().includes(ex.toUpperCase().substring(0, 10)))) {
-        if (name.toUpperCase().includes('STAT')) {
+    // Try multiple regex patterns for different Google Sheets HTML formats
+    const patterns = [
+      /id="sheet-button-(\d+)"[^>]*>([^<]+)</g,
+      /gid=(\d+)[^>]*>([^<]+)</g,
+      /<li[^>]*id="sheet-button-(\d+)"[^>]*><a[^>]*>([^<]+)</a>/g
+    ];
+
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(html)) !== null) {
+        const gid = match[1];
+        const name = match[2].trim();
+        // Check if already added
+        if (!tabs.some(t => t.gid === gid)) {
           tabs.push({gid, name});
+        }
+      }
+      if (tabs.length > 0) break;
+    }
+
+    // If we still can't find tabs, try to extract from the raw HTML more aggressively
+    if (tabs.length === 0) {
+      const sheetMatch = html.match(/sheet-button-\d+/g);
+      if (sheetMatch) {
+        for (const m of sheetMatch) {
+          const gid = m.replace('sheet-button-', '');
+          if (!tabs.some(t => t.gid === gid)) {
+            tabs.push({gid, name: 'Tab ' + gid});
+          }
         }
       }
     }
 
+    // If still nothing, try gid=0 and common sequential gids
     if (tabs.length === 0) {
-      // Fallback: try known tab structure
-      tabs.push({gid: '0', name: 'FEB STATS'});
+      // Try to brute-force discover tabs by fetching CSV for common gids
+      const tryGids = [0, 1, 2, 3, 4, 5];
+      for (const gid of tryGids) {
+        try {
+          const testUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${gid}`;
+          const testResp = await fetch(testUrl);
+          if (testResp.ok) {
+            const text = await testResp.text();
+            if (text.length > 50) {
+              tabs.push({gid: String(gid), name: `Tab ${gid}`});
+            }
+          }
+        } catch(e) {}
+      }
     }
 
-    // Fetch CSV for each tab
+    console.log('Discovered tabs:', tabs);
+
+    // Step 2: Filter to only STATS tabs, exclude private ones
+    const statsTabs = tabs.filter(t => {
+      const upper = t.name.toUpperCase();
+      const excluded = EXCLUDE_TABS.some(ex => upper.includes(ex.toUpperCase()));
+      // Include if it has STAT in name, or if we don't know the name (brute force), include all
+      const isStats = upper.includes('STAT') || t.name.startsWith('Tab ');
+      return !excluded && isStats;
+    });
+
+    if (statsTabs.length === 0 && tabs.length > 0) {
+      // If no STATS tabs found but we have tabs, take the first 3 (likely month tabs)
+      statsTabs.push(...tabs.slice(0, Math.min(3, tabs.length)));
+    }
+
+    console.log('Stats tabs:', statsTabs);
+
+    // Step 3: Fetch CSV for each stats tab
     DATA = {};
-    for (const tab of tabs) {
-      const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${tab.gid}`;
-      const csvResp = await fetch(csvUrl);
-      const csvText = await csvResp.text();
-      const parsed = Papa.parse(csvText, {header: false});
-      const rows = parsed.data;
+    for (const tab of statsTabs) {
+      try {
+        const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${tab.gid}`;
+        const csvResp = await fetch(csvUrl);
+        if (!csvResp.ok) continue;
+        const csvText = await csvResp.text();
+        const parsed = Papa.parse(csvText, {header: false});
+        const rows = parsed.data;
 
-      // Extract month key from tab name (e.g., "FEB STATS" -> "FEB", "MARCH STATS" -> "MAR")
-      const monthRaw = tab.name.replace(/\s*STATS?\s*/i, '').trim().toUpperCase();
-      const monthKey = monthRaw.substring(0, 3);
+        // Determine month key
+        let monthKey;
+        if (tab.name.toUpperCase().includes('STAT')) {
+          const monthRaw = tab.name.replace(/\s*STATS?\s*/i, '').trim().toUpperCase();
+          monthKey = monthRaw.substring(0, 3);
+        } else {
+          // Try to detect from data
+          monthKey = detectMonthFromData(rows) || 'TAB' + tab.gid;
+        }
 
-      const monthData = parseMonthTab(rows, monthKey);
-      DATA[monthKey] = monthData;
+        const monthData = parseMonthTab(rows);
+        if (monthData.bigTotal.sent > 0 || monthData.dailyRows > 0) {
+          DATA[monthKey] = monthData;
+        }
+      } catch(e) {
+        console.error('Error fetching tab', tab.name, e);
+      }
     }
 
-    // Sort months chronologically
-    const monthOrder = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    // Sort months
     const sorted = {};
-    Object.keys(DATA).sort((a,b) => monthOrder.indexOf(a) - monthOrder.indexOf(b)).forEach(k => sorted[k] = DATA[k]);
+    Object.keys(DATA).sort((a,b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b)).forEach(k => sorted[k] = DATA[k]);
     DATA = sorted;
 
-    // Set current month to latest
     const keys = Object.keys(DATA);
-    cur = keys[keys.length - 1];
+    if (keys.length > 0) {
+      cur = keys[keys.length - 1];
+      dataLive = true;
+      document.getElementById('dataSource').textContent = '● Connected to Google Sheets — ' + keys.length + ' months loaded';
+      show();
+      return;
+    }
 
-    document.getElementById('app').style.display = 'none';
-    document.getElementById('dashboard').style.display = 'block';
-    render();
-  } catch (err) {
+    throw new Error('No data found in sheets');
+  } catch(err) {
     console.error('Fetch error:', err);
-    document.getElementById('app').innerHTML = `
-      <div class="loading">
-        <h2>Couldn't load live data</h2>
-        <p>Using cached data instead. Error: ${err.message}</p>
-      </div>`;
     useFallbackData();
   }
+}
+
+function detectMonthFromData(rows) {
+  const months = {'jan':'JAN','feb':'FEB','mar':'MAR','apr':'APR','may':'MAY','jun':'JUN','jul':'JUL','aug':'AUG','sep':'SEP','oct':'OCT','nov':'NOV','dec':'DEC',
+    '01':'JAN','02':'FEB','03':'MAR','04':'APR','05':'MAY','06':'JUN','07':'JUL','08':'AUG','09':'SEP','10':'OCT','11':'NOV','12':'DEC'};
+  for (let i = 0; i < Math.min(rows.length, 20); i++) {
+    for (const cell of (rows[i] || [])) {
+      const s = String(cell || '').trim();
+      // Match date patterns like 01/03/2026 or 2026-03-01
+      const m1 = s.match(/^\d{1,2}\/(\d{1,2})\/\d{4}$/);
+      if (m1) return months[m1[1].padStart(2,'0')] || null;
+      const m2 = s.match(/^\d{4}-(\d{2})-\d{2}/);
+      if (m2) return months[m2[1]] || null;
+    }
+  }
+  return null;
 }
 
 function parseNum(val) {
   if (val === null || val === undefined || val === '') return 0;
   const s = String(val).trim();
-  if (s === '-' || s === '#VALUE!' || s.toLowerCase().includes('unable') || s.toLowerCase().includes('unabble')) return 0;
-  const n = parseFloat(s.replace(/,/g, ''));
+  if (s === '-' || s.includes('#') || s.toLowerCase().includes('unable') || s.toLowerCase().includes('unabble')) return 0;
+  const n = parseFloat(s.replace(/[,$]/g, ''));
   return isNaN(n) ? 0 : n;
 }
 
-function isDate(val) {
+function isDateCell(val) {
   if (!val) return false;
   const s = String(val).trim();
-  // Match dates like 01/03/2026 or 2026-03-01 or date serial numbers
-  return /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s) || /^\d{4}-\d{2}-\d{2}/.test(s) || /^\d{5}$/.test(s);
+  return /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s) || /^\d{4}-\d{2}-\d{2}/.test(s);
 }
 
-function parseMonthTab(rows, monthKey) {
+function parseMonthTab(rows) {
   const weekTotals = [];
   const dailyByChannel = {};
   const creators = [];
-  let bigTotal = {sent: 0, resp: 0, conv: 0};
+  let bigTotal = {sent:0, resp:0, conv:0};
   let inConverted = false;
+  let dailyRows = 0;
 
   CHANNELS.forEach(ch => dailyByChannel[ch.name] = []);
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.length === 0) continue;
-
     const cell0 = String(row[0] || '').trim().toUpperCase();
 
-    // Detect "BIG TOTAL" row — next row has the totals
+    // BIG TOTAL
     if (cell0.includes('BIG TOTAL')) {
       const nextRow = rows[i + 1];
       if (nextRow) {
@@ -249,67 +320,75 @@ function parseMonthTab(rows, monthKey) {
       continue;
     }
 
-    // Detect "TOTAL" rows (weekly combined totals)
+    // WEEK TOTAL rows (combined across all channels)
     if (cell0 === 'TOTAL' || cell0 === 'TOTAL ') {
-      weekTotals.push({
-        sent: parseNum(row[2]),
-        resp: parseNum(row[3]),
-        conv: parseNum(row[4])
-      });
+      weekTotals.push({sent:parseNum(row[2]), resp:parseNum(row[3]), conv:parseNum(row[4])});
       continue;
     }
 
-    // Detect converted tracker section
-    if (String(row[2] || '').trim().toUpperCase().includes('CONVERTED TRACKER')) {
+    // Converted tracker section
+    if (String(row[2]||'').trim().toUpperCase().includes('CONVERTED TRACKER')) {
       inConverted = true;
       continue;
     }
 
-    if (String(row[2] || '').trim().toUpperCase() === 'HANDLE' || String(row[2] || '').trim().toUpperCase() === 'HANDLE ') {
-      continue; // skip header row of converted section
-    }
-
-    // Parse converted creators
-    if (inConverted && row[2] && String(row[2]).trim() !== '') {
-      const handle = String(row[2]).trim();
-      if (handle && handle !== '' && !handle.includes('STATUSSES') && !handle.includes('DM SENT')) {
+    if (inConverted) {
+      const handle = String(row[2]||'').trim();
+      if (handle === 'HANDLE' || handle === 'HANDLE ' || handle === '') continue;
+      if (handle && !handle.includes('STATUSSES') && !handle.includes('DM SENT')) {
         creators.push({
           name: handle,
-          retainer: String(row[4] || '').trim(),
-          source: String(row[3] || '').trim(),
-          status: String(row[6] || '').trim().toUpperCase()
+          retainer: String(row[4]||'').trim(),
+          source: String(row[3]||'').trim(),
+          status: String(row[6]||'').trim().toUpperCase()
         });
       }
       continue;
     }
 
-    // Parse daily data rows (rows with dates in column A)
-    if (isDate(String(row[0] || '').trim()) || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(String(row[0] || '').trim())) {
+    // Daily data rows
+    if (isDateCell(row[0])) {
+      dailyRows++;
       const dateStr = String(row[0]).trim();
+      // Shorten date for display
+      let shortDate = dateStr;
+      const dm = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/\d{2,4}$/);
+      if (dm) {
+        const monthNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const mi = parseInt(dm[2] || dm[1]);
+        const di = parseInt(dm[1] || dm[2]);
+        // Google Sheets CSV: dd/mm/yyyy or mm/dd/yyyy — detect from context
+        shortDate = (monthNames[mi] || '') + ' ' + di;
+      }
+
       for (const ch of CHANNELS) {
         const sent = parseNum(row[ch.cols.sent]);
         const resp = parseNum(row[ch.cols.resp]);
         const conv = parseNum(row[ch.cols.conv]);
         if (sent > 0 || resp > 0 || conv > 0) {
-          dailyByChannel[ch.name].push({d: dateStr, s: sent, r: resp, c: conv});
+          dailyByChannel[ch.name].push({d:shortDate, s:sent, r:resp, c:conv});
         }
       }
     }
   }
 
-  // Build channels structure
   const channels = {};
   for (const ch of CHANNELS) {
-    channels[ch.name] = {weeks: [{days: dailyByChannel[ch.name]}]};
+    channels[ch.name] = {weeks:[{days:dailyByChannel[ch.name]}]};
   }
 
-  return {bigTotal, channels, weekTotals, creators};
+  return {bigTotal, channels, weekTotals, creators, dailyRows};
 }
 
-// ===== FALLBACK DATA (in case fetch fails) =====
+// ===== FALLBACK =====
 function useFallbackData() {
   DATA={"FEB":{bigTotal:{sent:1293,resp:47,conv:3},channels:{"Shah's TikTok":{weeks:[{days:[{d:"Feb 11",s:32,r:0,c:0},{d:"Feb 12",s:34,r:3,c:0},{d:"Feb 13",s:32,r:3,c:0},{d:"Feb 14",s:30,r:1,c:0},{d:"Feb 15",s:32,r:2,c:0},{d:"Feb 16",s:34,r:5,c:0},{d:"Feb 17",s:32,r:2,c:0},{d:"Feb 18",s:34,r:1,c:0},{d:"Feb 19",s:31,r:1,c:0},{d:"Feb 20",s:30,r:2,c:1},{d:"Feb 21",s:33,r:3,c:0},{d:"Feb 22",s:31,r:2,c:0},{d:"Feb 23",s:33,r:2,c:0},{d:"Feb 24",s:34,r:1,c:0},{d:"Feb 25",s:32,r:3,c:1},{d:"Feb 26",s:32,r:2,c:0},{d:"Feb 27",s:32,r:2,c:0},{d:"Feb 28",s:31,r:4,c:0}]}]},"TikTok Backend":{weeks:[{days:[{d:"Feb 11",s:40,r:0,c:0},{d:"Feb 12",s:20,r:0,c:0},{d:"Feb 13",s:37,r:1,c:0},{d:"Feb 14",s:38,r:1,c:0},{d:"Feb 15",s:34,r:0,c:0},{d:"Feb 16",s:40,r:1,c:0},{d:"Feb 17",s:42,r:0,c:0},{d:"Feb 18",s:40,r:0,c:0},{d:"Feb 19",s:40,r:0,c:0},{d:"Feb 20",s:40,r:0,c:0},{d:"Feb 21",s:41,r:0,c:0},{d:"Feb 22",s:45,r:0,c:0},{d:"Feb 23",s:40,r:2,c:0},{d:"Feb 24",s:40,r:0,c:0},{d:"Feb 25",s:40,r:0,c:1},{d:"Feb 26",s:40,r:0,c:0},{d:"Feb 27",s:40,r:1,c:0},{d:"Feb 28",s:23,r:1,c:0}]}]},"Business TikTok":{weeks:[{days:[{d:"Feb 11",s:34,r:1,c:0}]}]},"Serene Email":{weeks:[{days:[]}]}},weekTotals:[{sent:0,resp:0,conv:0},{sent:511,resp:20,conv:0},{sent:512,resp:14,conv:1},{sent:270,resp:13,conv:2}],creators:[{name:"yyanaj",retainer:"$700",source:"Shah's TikTok",status:"WAITING"},{name:"alanavibes21",retainer:"$1,500",source:"TikTok Backend",status:"SAMPLE PLACED"},{name:"gracefindss6",retainer:"$400",source:"Shah's TikTok",status:"SAMPLE PLACED"}]},"MAR":{bigTotal:{sent:1756,resp:81,conv:9},channels:{"Shah's TikTok":{weeks:[{days:[{d:"Mar 1",s:33,r:3,c:0},{d:"Mar 2",s:37,r:4,c:0},{d:"Mar 3",s:33,r:3,c:0},{d:"Mar 4",s:31,r:0,c:1},{d:"Mar 5",s:33,r:2,c:0},{d:"Mar 6",s:36,r:1,c:0},{d:"Mar 7",s:34,r:1,c:0},{d:"Mar 14",s:34,r:2,c:0},{d:"Mar 15",s:40,r:2,c:0},{d:"Mar 16",s:37,r:3,c:1},{d:"Mar 17",s:40,r:2,c:1},{d:"Mar 18",s:41,r:1,c:0},{d:"Mar 19",s:31,r:2,c:0},{d:"Mar 20",s:34,r:1,c:0},{d:"Mar 21",s:31,r:6,c:0},{d:"Mar 23",s:31,r:3,c:0},{d:"Mar 24",s:30,r:4,c:1},{d:"Mar 25",s:31,r:2,c:1},{d:"Mar 26",s:32,r:4,c:1},{d:"Mar 27",s:32,r:2,c:0},{d:"Mar 28",s:36,r:5,c:0},{d:"Mar 29",s:31,r:3,c:0}]}]},"TikTok Backend":{weeks:[{days:[{d:"Mar 1",s:44,r:0,c:0},{d:"Mar 2",s:50,r:1,c:1},{d:"Mar 3",s:40,r:1,c:0},{d:"Mar 4",s:22,r:0,c:0},{d:"Mar 5",s:40,r:0,c:0},{d:"Mar 14",s:69,r:0,c:0},{d:"Mar 15",s:60,r:2,c:0},{d:"Mar 16",s:40,r:0,c:0},{d:"Mar 17",s:41,r:1,c:0},{d:"Mar 18",s:40,r:1,c:0},{d:"Mar 19",s:24,r:0,c:0},{d:"Mar 20",s:40,r:0,c:0},{d:"Mar 21",s:40,r:1,c:0},{d:"Mar 22",s:58,r:0,c:0},{d:"Mar 23",s:61,r:0,c:0},{d:"Mar 24",s:40,r:3,c:0},{d:"Mar 25",s:41,r:2,c:1},{d:"Mar 26",s:42,r:1,c:0},{d:"Mar 27",s:40,r:1,c:0},{d:"Mar 28",s:41,r:0,c:0},{d:"Mar 29",s:41,r:0,c:0},{d:"Mar 30",s:54,r:1,c:0}]}]},"Serene Email":{weeks:[{days:[{d:"Mar 6",s:40,r:1,c:0},{d:"Mar 7",s:40,r:1,c:0},{d:"Mar 8",s:80,r:3,c:0},{d:"Mar 9",s:82,r:5,c:0}]}]},"Business TikTok":{weeks:[{days:[]}]}},weekTotals:[{sent:439,resp:16,conv:2},{sent:314,resp:21,conv:2},{sent:512,resp:16,conv:1},{sent:491,resp:28,conv:4}],creators:[{name:"dakidmakercome",retainer:"$1,000",source:"Shah's TikTok",status:"STARTED REC"},{name:"shopwithcourtneyy",retainer:"$750",source:"Shah's TikTok",status:"ONBOARDED"},{name:"mariahdontexist",retainer:"$750",source:"Shah's TikTok",status:"WAITING"},{name:"lady..t73",retainer:"$650",source:"Shah's TikTok",status:"ONBOARDED"},{name:"kanariiskitchen",retainer:"$800",source:"Shah's TikTok",status:"WAITING"},{name:"armoni_hance",retainer:"$500",source:"Shah's TikTok",status:"SAMPLE PLACED"},{name:"jaterao92",retainer:"$500",source:"TikTok Backend",status:"ONBOARDED"},{name:"selflovecoach31",retainer:"$600",source:"Shah's TikTok",status:"WAITING"},{name:"Candiceenikeia",retainer:"$500",source:"Shah's TikTok",status:"ONBOARDED"}]},"APR":{bigTotal:{sent:605,resp:22,conv:4},channels:{"Shah's TikTok":{weeks:[{days:[{d:"Apr 1",s:29,r:3,c:2},{d:"Apr 2",s:33,r:4,c:1},{d:"Apr 3",s:31,r:0,c:1},{d:"Apr 4",s:30,r:1,c:0},{d:"Apr 5",s:32,r:1,c:0},{d:"Apr 6",s:32,r:0,c:0},{d:"Apr 7",s:36,r:8,c:0},{d:"Apr 8",s:30,r:0,c:0}]}]},"TikTok Backend":{weeks:[{days:[{d:"Apr 1",s:56,r:1,c:0},{d:"Apr 2",s:41,r:2,c:0},{d:"Apr 3",s:40,r:1,c:0},{d:"Apr 4",s:76,r:0,c:0},{d:"Apr 5",s:55,r:0,c:0},{d:"Apr 6",s:44,r:0,c:0},{d:"Apr 7",s:40,r:1,c:0}]}]},"Serene Email":{weeks:[{days:[]}]},"Business TikTok":{weeks:[{days:[]}]}},weekTotals:[{sent:499,resp:13,conv:4},{sent:106,resp:9,conv:0}],creators:[{name:"selflovecoach31",retainer:"$600",source:"Shah's TikTok",status:"WAITING"},{name:"Candiceenikeia",retainer:"$500",source:"Shah's TikTok",status:"ONBOARDED"},{name:"marismyxx",retainer:"$300",source:"Shah's TikTok",status:"ONBOARDED"},{name:"sudierises",retainer:"$1,000",source:"Shah's TikTok",status:"WAITING"}]}};
-  cur = "APR";
+  cur="APR";
+  document.getElementById('dataSource').textContent='Using cached data — live connection unavailable';
+  show();
+}
+
+function show() {
   document.getElementById('app').style.display='none';
   document.getElementById('dashboard').style.display='block';
   render();
@@ -322,7 +401,6 @@ function daily(m){const dm={};Object.values(DATA[m].channels).forEach(ch=>ch.wee
 
 function render(){
   document.getElementById('tabs').innerHTML=Object.keys(DATA).map(k=>`<div class="tab ${k===cur?'active':''}" onclick="cur='${k}';render()">${k}</div>`).join('');
-
   const t=totals(cur);
   document.getElementById('stats').innerHTML=`
     <div class="stat"><div class="stat-top"><span class="stat-label">DMs Sent</span><span class="stat-tag" style="background:var(--pop-green-bg);color:var(--pop-green)">Total</span></div><div class="stat-num">${t.sent.toLocaleString()}</div><div class="stat-sub">All channels</div><div class="stat-bar" style="background:var(--pop-green)"></div></div>
@@ -330,29 +408,21 @@ function render(){
     <div class="stat"><div class="stat-top"><span class="stat-label">Converted</span><span class="stat-tag" style="background:var(--pop-orange-bg);color:var(--pop-orange)">${t.cr}%</span></div><div class="stat-num">${t.conv}</div><div class="stat-sub">Signed creators</div><div class="stat-bar" style="background:var(--pop-orange)"></div></div>
     <div class="stat"><div class="stat-top"><span class="stat-label">Response Rate</span></div><div class="stat-num">${t.rr}%</div><div class="stat-sub">DMs → Replies</div><div class="stat-bar" style="background:var(--black)"></div></div>
     <div class="stat"><div class="stat-top"><span class="stat-label">Conversion Rate</span></div><div class="stat-num">${t.cr}%</div><div class="stat-sub">Replies → Signed</div><div class="stat-bar" style="background:var(--pop-purple)"></div></div>`;
-
   const d=daily(cur),ctx=document.getElementById('chart').getContext('2d');
   if(chart)chart.destroy();
   chart=new Chart(ctx,{type:'bar',data:{labels:d.l,datasets:[{label:'DMs Sent',data:d.s,backgroundColor:'#0a0a0a',borderRadius:3,barPercentage:.65},{label:'Responses',data:d.r,backgroundColor:'#2979ff',borderRadius:3,barPercentage:.65},{label:'Converted',data:d.c,backgroundColor:'#ff6d00',borderRadius:3,barPercentage:.65}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#999',font:{family:'Syne',size:11,weight:'600'},usePointStyle:true,pointStyleWidth:8}}},scales:{x:{ticks:{color:'#bbb',font:{size:9},maxRotation:45},grid:{display:false}},y:{ticks:{color:'#bbb',font:{size:10}},grid:{color:'#f0f0f0'}}}}});
-
   const mx=Math.max(...Object.values(t.ch).map(c=>c.sent),1),cols={"Shah's TikTok":"#0a0a0a","TikTok Backend":"#2979ff","Serene Email":"#7c4dff","Business TikTok":"#ff6d00"};
   document.getElementById('channels').innerHTML=Object.entries(t.ch).map(([n,v])=>{const p=(v.sent/mx*100).toFixed(0),col=cols[n]||'#0a0a0a',rr=v.sent>0?((v.resp/v.sent)*100).toFixed(1):'0';return`<div class="ch-item"><div class="ch-top"><span class="ch-name">${n}</span><span class="ch-num" style="color:${col}">${v.sent}</span></div><div class="ch-bar"><div class="ch-bar-fill" style="width:${p}%;background:${col}"></div></div><div class="ch-stats"><span>${v.resp} responses (${rr}%)</span><span>${v.conv} converted</span></div></div>`}).join('');
-
   const wt=DATA[cur].weekTotals||[];
-  document.getElementById('weeklyBody').innerHTML=wt.map((w,i)=>{const rr=w.sent>0?((w.resp/w.sent)*100).toFixed(1):'0.0',cr=w.resp>0?((w.conv/w.resp)*100).toFixed(1):'0.0';return`<tr><td style="font-weight:700">Week ${i+1}</td><td><span class="tag tag-green">${w.sent.toLocaleString()}</span></td><td><span class="tag tag-blue">${w.resp}</span></td><td><span class="tag tag-orange">${w.conv}</span></td><td style="color:#999">${rr}%</td><td style="color:#999">${cr}%</td></tr>`}).join('');
-
+  document.getElementById('weeklyBody').innerHTML=wt.length===0?'<tr><td colspan="6" style="text-align:center;color:#999">No weekly data</td></tr>':wt.map((w,i)=>{const rr=w.sent>0?((w.resp/w.sent)*100).toFixed(1):'0.0',cr=w.resp>0?((w.conv/w.resp)*100).toFixed(1):'0.0';return`<tr><td style="font-weight:700">Week ${i+1}</td><td><span class="tag tag-green">${w.sent.toLocaleString()}</span></td><td><span class="tag tag-blue">${w.resp}</span></td><td><span class="tag tag-orange">${w.conv}</span></td><td style="color:#999">${rr}%</td><td style="color:#999">${cr}%</td></tr>`}).join('');
   const creators=DATA[cur].creators||[];
   document.getElementById('creatorsBody').innerHTML=creators.length===0?'<div class="empty-state">No converted creators yet this month</div>':creators.map(c=>{const sc=c.status.includes('ONBOARD')?'s-onboarded':c.status.includes('WAITING')?'s-waiting':c.status.includes('SAMPLE')?'s-sample':c.status.includes('STARTED')?'s-started':c.status.includes('STRUGGLING')?'s-struggling':'s-waiting';return`<div class="cr-row"><div><div class="cr-name">@${c.name}</div><div class="cr-handle">Creator</div></div><div class="cr-retainer">${c.retainer}</div><div class="cr-source">${c.source}</div><div><span class="status ${sc}">${c.status}</span></div></div>`}).join('');
 }
 
 // ===== INIT =====
 document.getElementById('updated').textContent=new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
-
-// Try live fetch, fallback to cached data
 fetchSheet();
-
-// Auto-refresh every 2 minutes
-setInterval(fetchSheet, 120000);
+setInterval(()=>{ if(dataLive) fetchSheet(); }, 120000);
 </script>
 </body>
 </html>
